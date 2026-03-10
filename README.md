@@ -1,386 +1,236 @@
-# DESFire EV3 Card Provisioning Toolkit
 
-Internal company script suite for provisioning and managing NXP DESFire EV3 contactless cards. Supports both DES and AES encryption for PICC (PICC Integrity Crypto Key) master keys.
+# DESFire EV3 Provisioning Utilities
 
-## Overview
+This repository contains a small set of scripts for provisioning and resetting MIFARE DESFire EV3 cards.
 
-This toolkit provides three main utilities for complete card lifecycle management:
+The workflow implemented here is:
 
-- **`provision.py`** — Create and encrypt application data on cards
-- **`change_picc_key.py`** — Rotate PICC master key (DES ↔ AES)
-- **`factory_reset.py`** — Wipe all applications and reset to defaults
-- **`desfsh`** — Low-level command-line interface (binary)
+1. Provision the card with an application, file, and encrypted payload.
+2. Disable anonymous AID enumeration at the PICC level.
+3. Optionally rotate the PICC master key.
+4. Reset the card back to a factory-like state later, even if AID enumeration has been disabled.
 
-## Prerequisites
+The tooling is split between direct PC/SC APDU handling in Python and `desfsh` for PICC-level operations that were verified on the target card.
 
-### Hardware
-- NXP DESFire EV3 contactless card reader (ACR122U or compatible or ISO14443)
-- NXP DESFire EV3 cards
+## Files
 
-### Software
+### `provision.py`
+
+Provisions a card with an application and writes encrypted data.
+
+Its workflow is:
+
+- authenticate to the PICC
+- create an application
+- select the application
+- authenticate to the application
+- create/write the target file
+- disable anonymous AID enumeration on the PICC
+- optionally change the PICC master key
+
+This script uses the existing Python smartcard flow for provisioning, then uses `desfsh` for the PICC post-steps.
+
+### `factory_reset.py`
+
+Resets a DESFire card to a factory-like state.
+
+It is designed to work even when anonymous AID enumeration has been disabled. Instead of relying on unauthenticated `GetApplicationIDs`, it authenticates to the PICC first and then enumerates applications through an authenticated session.
+
+Its workflow is:
+
+- select PICC
+- authenticate with the current PICC key
+- list installed applications
+- delete applications
+- verify that no applications remain
+
+Depending on the exact version in your working tree, you may also have a variant that restores the PICC key and re-enables anonymous AID enumeration.
+
+### `change_picc_key.py`
+
+Changes the PICC master key using `desfsh`.
+
+It supports:
+
+- DES and AES PICC keys
+- auto-detection of key type by key length
+- trying default keys if the old key is not provided
+- optional confirmation skipping with `-y`
+
+### `desfsh`
+
+Used for PICC-level operations such as:
+
+- PICC authentication
+- reading key settings
+- changing key settings
+- changing the PICC master key
+- authenticated `GetApplicationIDs`
+
+## Requirements
+
+You need:
+
+- Python 3
+- `pyscard`
+- `pycryptodome`
+- a working PC/SC stack
+- a contactless smartcard reader
+- `desfsh`
+
+Install Python dependencies:
+
 ```bash
-pip install pycryptodome smartcard
-```
+pip install pyscard pycryptodome
+````
 
-Ensure `desfsh` binary is in the working directory or specify with `--desfsh` flag.
+## Reader assumptions
 
-## Quick Start
+The scripts expect a working PC/SC contactless reader. In the current Python-based scripts, the reader selection typically looks for a reader with `"Contactless"` in its name.
 
-### 1. Factory Fresh Card (Default Keys)
+## PICC key handling
 
-Start with a brand-new card or one reset to factory defaults:
+The scripts support both common PICC master-key forms:
+
+* DES: 8 bytes, passed as 16 hex characters
+* AES: 16 bytes, passed as 32 hex characters
+
+Examples:
+
+* DES default zero key: `0000000000000000`
+* AES default zero key: `00000000000000000000000000000000`
+
+## Typical workflow
+
+### 1. Provision a card
+
+Example:
 
 ```bash
 python3 provision.py \
-    --picc-key 00:00:00:00:00:00:00:00 \
-    --app-id A1:B2:C3 \
-    --app-key 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF \
-    --data-key AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99 \
-    --data "EMP000123"
+  --picc-key 0000000000000000 \
+  --app-id A1B2C3 \
+  --app-key 00112233445566778899AABBCCDDEEFF \
+  --data-key AABBCCDDEEFF00112233445566778899 \
+  --data "EMP000123" \
+  --desfsh ./desfsh \
+  --device 1 \
+  --tag 0
 ```
 
-### 2. Card with Custom Keys
+This provisions the card, disables anonymous AID enumeration, and leaves the PICC key unchanged.
 
-If the PICC key has been changed to AES:
+### 2. Provision and rotate PICC key
+
+Example:
 
 ```bash
 python3 provision.py \
-    --picc-key 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10 \
-    --app-id A1:B2:C3 \
-    --app-key 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF \
-    --data-key AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99 \
-    --data "EMP000123"
+  --picc-key 0000000000000000 \
+  --new-picc-key 0102030405060708090A0B0C0D0E0F10 \
+  --app-id A1B2C3 \
+  --app-key 00112233445566778899AABBCCDDEEFF \
+  --data-key AABBCCDDEEFF00112233445566778899 \
+  --data "EMP000123" \
+  --desfsh ./desfsh \
+  --device 1 \
+  --tag 0
 ```
 
-### 3. Rotate PICC Key
+This provisions the card, disables anonymous AID enumeration, and then changes the PICC master key.
 
-Change PICC master key from DES to AES (auto-detects current key):
+### 3. Change PICC key separately
+
+Example:
 
 ```bash
 python3 change_picc_key.py \
-    --new-key 0102030405060708090A0B0C0D0E0F10
+  --old-key 0000000000000000 \
+  --new-key 0102030405060708090A0B0C0D0E0F10 \
+  --desfsh ./desfsh \
+  --device 1 \
+  --tag 0
 ```
 
-Or specify old key explicitly:
+### 4. Factory-reset a card
+
+If the card still uses the default DES PICC key:
 
 ```bash
-python3 change_picc_key.py \
-    --old-key 0000000000000000 \
-    --new-key 0102030405060708090A0B0C0D0E0F10 \
-    -y
+python3 factory_reset.py --picc-key 0000000000000000
 ```
 
-### 4. Factory Reset a Card
-
-Wipe all applications and reset PICC key to default DES zeros:
+If the PICC key was rotated:
 
 ```bash
-python3 factory_reset.py
+python3 factory_reset.py --picc-key 0102030405060708090A0B0C0D0E0F10
 ```
 
-## Detailed Usage
+This works even when unauthenticated `GetApplicationIDs` is blocked.
 
-### `provision.py` — Application Provisioning
+## Verified behavior
 
-Creates an AES-secured application on the card with encrypted data.
+The workflow was validated against a card where:
 
-**Arguments:**
-- `--picc-key` (required) — Current PICC master key in `XX:XX:...` format
-  - DES format: 8 bytes (e.g., `00:00:00:00:00:00:00:00`)
-  - AES format: 16 bytes (e.g., `01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10`)
-- `--app-id` (required) — 3-byte application ID (e.g., `A1:B2:C3`)
-- `--app-key` (required) — AES-128 authentication key for the application (16 bytes)
-- `--data-key` (required) — AES-128 encryption key for data (16 bytes)
-- `--data` (required) — Plain text string to store (max 240 bytes)
+* unauthenticated `GetApplicationIDs` returned `AUTHENTICATION_ERROR`
+* PICC authentication with default DES key succeeded
+* authenticated `GetApplicationIDs` returned the installed AIDs
 
-**Output:**
-```
-[1] Detects card presence
-[2] Authenticates with PICC key
-[3] Creates AES application
-[4] Sets application authentication key
-[5] Creates encrypted data file
-[6] Writes encrypted payload
-[7] Verifies read-back
-```
+That confirms anonymous AID enumeration was disabled while authenticated enumeration still worked.
 
-**Example with Employee ID:**
-```bash
-python3 provision.py \
-    --picc-key 00:00:00:00:00:00:00:00 \
-    --app-id FF:01:02 \
-    --app-key 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00 \
-    --data-key AA:BB:CC:DD:EE:FF:11:22:33:44:55:66:77:88:99:00 \
-    --data "EMP000456"
-```
+## Notes on AID enumeration
 
----
+Disabling AID enumeration means `GetApplicationIDs` is no longer available anonymously. The PICC must first be authenticated with the PICC master key.
 
-### `change_picc_key.py` — PICC Key Rotation
+In `desfsh`, this is done with:
 
-Safely rotate the PICC master key. Supports auto-detection of current key or explicit specification.
+* `cmd.auth(0, DES("..."))` or `cmd.auth(0, AES("..."))`
+* then `cmd.appids()`
 
-**Arguments:**
-- `--new-key` (required) — Target PICC key (16 chars DES / 32 chars AES)
-- `--old-key` (optional) — Current PICC key. If omitted, tries defaults then prompts
-- `--desfsh` (optional) — Path to `desfsh` binary (default: `./desfsh`)
-- `--device` (optional) — Device index (default: `1`)
-- `--tag` (optional) — Tag index (default: `0`)
-- `-y, --yes` (optional) — Skip confirmation prompt
+The key-settings bit controlling open listing is the LIST bit. Clearing it disables anonymous AID enumeration.
 
-**Key Format (hex string, no colons):**
-- DES: `0000000000000000` (16 hex characters)
-- AES: `0102030405060708090A0B0C0D0E0F10` (32 hex characters)
+## Notes on initialization vectors
 
-**Workflow:**
-```
-[1] Detects card
-[2] Auto-detects or validates current key
-[3] Confirms change with user
-[4] Changes key securely
-[5] Verifies new key works
-```
+The working authentication flows in this repository use:
 
-**Examples:**
+* zero IV for legacy DES / AES authentication handshakes
+* derived IVs for EV2 secure messaging where applicable
 
-Auto-detect old key, change to AES:
-```bash
-python3 change_picc_key.py --new-key 0102030405060708090A0B0C0D0E0F10
-```
-
-Explicit DES → AES, skip confirmation:
-```bash
-python3 change_picc_key.py \
-    --old-key 0000000000000000 \
-    --new-key 0102030405060708090A0B0C0D0E0F10 \
-    -y
-```
-
-AES → DES (factory reset):
-```bash
-python3 change_picc_key.py \
-    --old-key 0102030405060708090A0B0C0D0E0F10 \
-    --new-key 0000000000000000
-```
-
-With custom device:
-```bash
-python3 change_picc_key.py \
-    --new-key 0102030405060708090A0B0C0D0E0F10 \
-    --device 2 \
-    --tag 0
-```
-
----
-
-### `factory_reset.py` — Card Wipe
-
-Completely resets a card by deleting all applications and resetting PICC key to default DES.
-
-**Requirements:**
-- Card must have default or known PICC key
-- Uses DES default (`00:00:00:00:00:00:00:00`)
-- Apps with unknown keys will be skipped with warning
-
-**Workflow:**
-```
-[1] Detects card
-[2] Authenticates with default DES key
-[3] Enumerates all applications
-[4] Deletes each application (authenticating if needed)
-[5] Verifies card is clean
-```
-
-**Usage:**
-```bash
-python3 factory_reset.py
-```
-
-**Output example:**
-```
-=== Step 1: Select PICC ===
-  ✓ Card detected
-  ✓ DES auth OK
-
-=== Step 2: List Applications ===
-  Found 2 app(s): FF:01:02, FF:03:04
-
-=== Deleting app FF:01:02 ===
-  ✓ Deleted FF:01:02
-
-=== Deleting app FF:03:04 ===
-  ✓ Deleted FF:03:04
-
-=== Step 4: Verify ===
-  ✓ Card is factory fresh — no applications
-```
-
-**Troubleshooting:**
-
-If you see `SW: 91 AE` (authentication failed):
-```
-The card's PICC master key is not default DES zeros.
-First reset it to default using change_picc_key.py:
-
-  python3 change_picc_key.py \
-      --old-key <YOUR_CURRENT_KEY> \
-      --new-key 0000000000000000
-```
-
----
-
-## Key Management
-
-### Default Keys
-
-| Type | Value | Use Case |
-|------|-------|----------|
-| DES (PICC) | `00:00:00:00:00:00:00:00` | Factory default |
-| DES (PICC, hex) | `0000000000000000` | `change_picc_key.py` format |
-| AES (PICC) | `00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00` | After AES migration |
-| AES (app/data) | `00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF` | Default AES example |
-
-### Supported Formats
-
-```
-Hex with colons (provision.py, factory_reset.py):
-  00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF
-
-Hex without separators (change_picc_key.py):
-  0011223344556677889900AABBCCDDEEFF
-```
-
-### Key Encryption
-
-- **PICC key:** Authenticates to PICC (card root)
-- **Application key:** Authenticates to application
-- **Data key:** Encrypts/decrypts file contents using AES-128-CBC
-
-Data files are encrypted **client-side** before transmission to the card, ensuring data security in transit.
-
----
-
-## Workflow Examples
-
-### Scenario 1: New Card Issuance
-
-```bash
-# 1. Factory reset to ensure clean state
-python3 factory_reset.py
-
-# 2. Upgrade PICC key for security
-python3 change_picc_key.py \
-    --old-key 0000000000000000 \
-    --new-key AABBCCDDEEFF00112233445566778899 \
-    -y
-
-# 3. Provision with employee data
-python3 provision.py \
-    --picc-key AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99 \
-    --app-id FF:01:02 \
-    --app-key 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00 \
-    --data-key AA:BB:CC:DD:EE:FF:11:22:33:44:55:66:77:88:99:00 \
-    --data "EMP001234"
-```
-
-### Scenario 2: Key Rotation on Existing Cards
-
-```bash
-# Check current key and rotate
-python3 change_picc_key.py \
-    --new-key 1122334455667788990011223344556677
-
-# Confirm when prompted
-```
-
-### Scenario 3: Repurposing Card
-
-```bash
-# Wipe existing provisioning
-python3 factory_reset.py
-
-# Re-provision with new data
-python3 provision.py \
-    --picc-key 00:00:00:00:00:00:00:00 \
-    --app-id FF:02:03 \
-    --app-key FF:EE:DD:CC:BB:AA:99:88:77:66:55:44:33:22:11:00 \
-    --data-key 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF \
-    --data "EMP001235"
-```
-
----
+The zero IV is not itself a problem in the tested legacy authentication flow. Problems would arise if a stateful secure-messaging session were extended incorrectly while reusing the wrong IV behavior.
 
 ## Troubleshooting
 
-### "No contactless reader found"
-- Ensure ACR122U or compatible reader is connected
-- Check `lsusb` (Linux) or Device Manager (Windows)
-- Install reader drivers if needed
+### `AUTHENTICATION_ERROR` on unauthenticated `GetApplicationIDs`
 
-### "No card detected"
-- Place card on reader surface
-- Try different reader positions
-- Check card is not damaged
+This usually means anonymous AID enumeration has been disabled. This is expected after provisioning if the PICC LIST bit was cleared.
 
-### "AUTH_FAILED" / "SW: 91 AE"
-- Incorrect PICC key provided
-- Card may have non-default key — use `change_picc_key.py` with `--old-key` to specify
-- Try defaults with auto-detection (omit `--old-key`)
+### `AUTHENTICATION_ERROR` on PICC auth
 
-### "desfsh not found"
-- Ensure `desfsh` binary is in current directory, or
-- Specify explicit path: `--desfsh /path/to/desfsh`
+Common causes:
 
-### File path issues
-- Use absolute paths for `--desfsh` when not in working directory
-- Verify binary has execute permissions: `chmod +x desfsh`
+* wrong PICC key
+* wrong PICC key type (DES vs AES)
+* PICC key was already changed earlier
 
----
+Try the correct current PICC key explicitly.
 
-## Security Notes
+### `No card detected`
 
-⚠️ **Important:**
-- **Store keys securely.** Do not commit keys to version control.
-- **Data encryption:** Files are encrypted on card using AES-128-CBC with no free read access.
-- **Key derivation:** Use cryptographically secure random or KMS for production keys.
-- **Audit access:** Log all provisioning operations with timestamps and operator ID.
-- **Key rotation:** Rotate PICC keys periodically; update records accordingly.
+This is usually a reader / PCSC issue or a card-presence check that does not match the reader behavior. If direct `desfsh` commands work but a Python wrapper reports no card, the problem is likely the reader-detection logic rather than the card.
 
----
+### `attempt to call a nil value`
 
-## Technical Details
+This means your `desfsh` build does not expose the Lua helper name the script expected. On the verified build used here, the correct application-list command is:
 
-### Authentication Methods
-- **DES:** Single DES (PICC) or 3DES (legacy)
-- **AES:** EV2 enhanced authentication with session key derivation
-- **Session keys:** Derived using AES-CMAC per DESFire spec
+* `cmd.appids()`
 
-### Data Encryption
-- **Algorithm:** AES-128-CBC
-- **Padding:** ISO/IEC 7816-4 (0x80 followed by 0x00s)
-- **IV:** All zeros (client-side pre-encryption)
+## Security note
 
-### File Structure
-- **File ID:** 0x01 (data file)
-- **Access:** Key 0 required for all read/write operations
-- **Max size:** 240 bytes per file
+These scripts handle real card master keys. Treat all keys as sensitive material. Do not commit production keys into the repository or shell history.
 
----
+## License
 
-## Support
+See `LICENSE`.
 
-For issues or questions:
-1. Check troubleshooting section above
-2. Verify card and reader are functioning
-3. Test with factory defaults first
-4. Check `desfsh` binary version compatibility
-
----
-
-## Version History
-
-- **v1.0** — Initial release
-  - DES and AES PICC key support
-  - Application provisioning with encrypted data
-  - Secure key rotation
-  - Factory reset utility
+```
+```
